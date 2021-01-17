@@ -6,25 +6,19 @@ import com.roastgg.options.beans.StockData;
 import com.roastgg.options.repository.OptionsRepository;
 import org.apache.commons.lang.UnhandledException;
 import org.apache.commons.math3.analysis.function.Log;
-import org.apache.commons.math3.analysis.function.Power;
 import org.apache.commons.math3.analysis.function.Sqrt;
 import org.apache.commons.math3.distribution.NormalDistribution;
 import org.apache.commons.math3.stat.descriptive.moment.StandardDeviation;
-import org.bouncycastle.pqc.jcajce.provider.qtesla.SignatureSpi;
 import org.joda.time.DateTime;
 import org.joda.time.format.DateTimeFormat;
 import org.joda.time.format.DateTimeFormatter;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.actuate.autoconfigure.metrics.MetricsProperties;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-
-import java.text.DecimalFormat;
 import java.text.SimpleDateFormat;
-import java.time.Instant;
 import java.util.*;
 
 @Service
@@ -96,12 +90,6 @@ public class OptionsService {
         return priceList;
     }
 
-    public StockData stringToStockData(String string) {
-        StockData stockData = new StockData();
-
-        return stockData;
-    }
-
     private Map<String, Map<String,String>> calculateOptionsPrices(ArrayList<Price> prices, String symbol) {
 
         Map<String, Map<String, String>> optionsMap = new LinkedHashMap<>();
@@ -109,17 +97,19 @@ public class OptionsService {
         Collections.sort(prices, new SortByDate());
         Integer numberofcycles = prices.size();
 
-        Double std = calculateLogStd(prices);
+        Double std = calculateLogStd(prices, numberofcycles);
         LinkedHashMap<String, Double> expiryTimes = calculateExpiryTimes();
         Double stockCurrentPrice = getStockCurrentPrice(symbol);
         ArrayList<Double> strikePrices = calculateStrikePrice(stockCurrentPrice);
-        DecimalFormat df = new DecimalFormat("#####0.00");
+        Double dividend = callDividendApi(symbol);
+        System.out.println(dividend);
+        System.out.println(std);
 
         for(Double price : strikePrices) {
             Map<String, String> pricesInTime = new LinkedHashMap<>();
             for (String date : expiryTimes.keySet()) {
 
-                pricesInTime.put(date, calculateBS(price, expiryTimes.get(date), std, stockCurrentPrice, numberofcycles).toString());
+                pricesInTime.put(date, calculateBS(price, expiryTimes.get(date), std, stockCurrentPrice, dividend).toString());
             }
             optionsMap.put(price.toString(), pricesInTime);
         }
@@ -127,7 +117,7 @@ public class OptionsService {
         return optionsMap;
     }
 
-    private Double calculateLogStd(ArrayList<Price> prices) {
+    private Double calculateLogStd(ArrayList<Price> prices, Integer numberofcycles) {
 
         double[] closingPrices = new double[prices.size()-1];
         Log log = new Log();
@@ -141,7 +131,8 @@ public class OptionsService {
         StandardDeviation standardDeviation = new StandardDeviation();
         double std = standardDeviation.evaluate(closingPrices);
 
-        return std;
+        //For annualized returns
+        return std * Math.sqrt(252/numberofcycles);
     }
 
     private LinkedHashMap<String, Double> calculateExpiryTimes() {
@@ -214,20 +205,19 @@ public class OptionsService {
 
     }
 
-    private Double calculateBS(Double strike, Double expiry, Double std, Double currentprice, Integer numberofcycles) {
+    private Double calculateBS(Double strike, Double expiry, Double std, Double currentprice, Double dividend) {
 
         Double optionPrice = 0.0;
-        Double r = 0.01;
-        std = std * Math.sqrt(252/numberofcycles);
-        System.out.println(std);
+        Double r = 0.0008;
 
-        Double d1 = calculateD1(currentprice, strike, expiry, std);
-        Double d2 = calculateD2(currentprice, strike, expiry, std);
-
+        Double d1 = calculateD1(currentprice, strike, expiry, std, dividend);
+        Double d2 = calculateD2(currentprice, strike, expiry, std, dividend);
 
         NormalDistribution normalDistribution = new NormalDistribution();
 
-        Double weightprice = currentprice *  normalDistribution.cumulativeProbability(d1);
+        Double discountedprice = currentprice * Math.exp(-dividend * expiry);
+
+        Double weightprice = discountedprice *  normalDistribution.cumulativeProbability(d1);
         Double discountedStrikePrice = strike * Math.exp(-r * expiry);
 
         Double weightedstrikeprice = discountedStrikePrice * normalDistribution.cumulativeProbability(d2);
@@ -236,27 +226,50 @@ public class OptionsService {
 
     }
 
-    private Double calculateD1(Double currentprice, Double strike, Double expiry, Double std) {
-        Double r = 0.01;
+    private Double calculateD1(Double currentprice, Double strike, Double expiry, Double std, Double dividend) {
+        Double r = 0.0008;
         Log log = new Log();
         Sqrt sqrt = new Sqrt();
 
-        Double numerator = log.value(currentprice/strike) + ((r + ((std*std))/2) * expiry);
+        Double numerator = log.value(currentprice/strike) + ((r - dividend + ((std*std))/2) * expiry);
         Double denominator = std * sqrt.value(expiry);
 
         return numerator/denominator;
     }
 
-    private Double calculateD2(Double currentprice, Double strike, Double expiry, Double std) {
-        Double r = 0.01;
+    private Double calculateD2(Double currentprice, Double strike, Double expiry, Double std, Double dividend) {
+        Double r = 0.0008;
 
         Log log = new Log();
         Sqrt sqrt = new Sqrt();
 
-        Double numerator = log.value(currentprice/strike) + ((r - ((std*std)/2)) * expiry);
+        Double numerator = log.value(currentprice/strike) + ((r - dividend - ((std*std)/2)) * expiry);
         Double denominator = std * sqrt.value(expiry);
 
         return numerator/denominator;
+    }
+
+    private Double callDividendApi(String symbol) {
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("https://www.alphavantage.co/query?function=OVERVIEW&symbol=");
+        sb.append(symbol);
+        sb.append("&apikey=");
+        sb.append(key);
+
+        try {
+            WebClient webClient = WebClient.create(sb.toString());
+            WebClient.ResponseSpec response1 = webClient.get().retrieve();
+            Map<String, String> overview = response1.bodyToMono(Map.class).share().block();
+
+            return Double.parseDouble(overview.get("DividendYield"));
+
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+
+        return 0.0;
+
     }
 
     class SortByDate implements Comparator<Price> {
