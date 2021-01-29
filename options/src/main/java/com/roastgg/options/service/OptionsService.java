@@ -37,9 +37,11 @@ public class OptionsService {
         Flux<Price> options = optionsRepository.findPriceBySymbol(symbol);
         Mono<List<Price>> optionslist = options.collectList();
         pricelist = (ArrayList<Price>)optionslist.share().block();
+        DateTime dt = new DateTime(new Date());
+        dt = dt.minusDays(4);
 
 
-        if (pricelist != null && pricelist.size() == 0) {
+        if (pricelist != null && (pricelist.size() == 0 || dt.isAfter(pricelist.get(0).getMarketDate().getTime()))) {
             pricelist = callStockPriceApi(symbol);
         }
         if (null == pricelist || pricelist.size() == 0) {
@@ -102,8 +104,6 @@ public class OptionsService {
         Double stockCurrentPrice = getStockCurrentPrice(symbol);
         ArrayList<Double> strikePrices = calculateStrikePrice(stockCurrentPrice);
         Double dividend = callDividendApi(symbol);
-        System.out.println(dividend);
-        System.out.println(std);
 
         for(Double price : strikePrices) {
             Map<String, String> pricesInTime = new LinkedHashMap<>();
